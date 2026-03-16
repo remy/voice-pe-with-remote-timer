@@ -38,7 +38,7 @@ esphome:
   name: home-assistant-voice
   friendly_name: Home Assistant Voice
   name_add_mac_suffix: true
-  min_version: 2025.12.0
+  min_version: 2026.2.0
   on_boot:
     priority: 375
     then:
@@ -62,7 +62,7 @@ esp32:
   flash_size: 16MB
   framework:
     type: esp-idf
-    version: 5.5.1
+    version: recommended
     sdkconfig_options:
       CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
@@ -179,6 +179,62 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # ----------------------------- 
+  # Remote (device-local) timer
+  # ----------------------------- 
+  - id: remote_timer_total_seconds
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: remote_timer_remaining_seconds
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: remote_timer_running
+    type: bool
+    restore_value: yes
+    initial_value: "false"
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: return id(remote_timer_running);
+          then:
+            - lambda: |-
+                if (id(remote_timer_remaining_seconds) > 0) {
+                  id(remote_timer_remaining_seconds) -= 1;
+                }
+            - script.execute: control_leds
+            - if:
+                condition:
+                  lambda: return id(remote_timer_running) && (id(remote_timer_remaining_seconds) <= 0);
+                then:
+                  - lambda: |-
+                      id(remote_timer_running) = false;
+                  - switch.turn_on: timer_ringing
+                  - script.execute: control_leds
+
+number:
+  - platform: template
+    id: remote_timer_seconds
+    name: "VoicePE Remote Timer Seconds"
+    icon: mdi:timer
+    min_value: 0
+    max_value: 7200
+    step: 1
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          int v = (int) x;
+          if (v < 0) v = 0;
+          id(remote_timer_total_seconds) = v;
+          id(remote_timer_remaining_seconds) = v;
+          id(control_leds).execute();
 
 switch:
   # This is the master mute switch. It is exposed to Home Assistant. The user can only turn it on and off if the hardware switch is off. (The hardware switch overrides the software one)
@@ -929,6 +985,31 @@ light:
                 }
               }
               index = (index + 1);
+      - addressable_lambda:
+          name: "Remote Timer tick"
+          update_interval: 200ms
+          lambda: |-
+            int total = id(remote_timer_total_seconds);
+            int rem = id(remote_timer_remaining_seconds);
+
+            if (total <= 0) {
+              for (int i = 0; i < 12; i++) it[i] = Color::BLACK;
+              return;
+            }
+
+            float frac = (float) rem / (float) total;
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
+
+            int lit = (int) ceilf(frac * 12.0f);
+
+            auto cvals = id(led_ring).current_values;
+            Color color(cvals.get_red() * 255, cvals.get_green() * 255, cvals.get_blue() * 255);
+
+            for (int i = 0; i < 12; i++) {
+              if (i < lit) it[i] = color;
+              else it[i] = Color::BLACK;
+            }
 
   # User facing LED ring. Remapping of the internal LEDs.
   # Exposed to be used by the user.
@@ -1009,6 +1090,16 @@ sensor:
                       id: control_hue
                       increase_hue: false
 
+  - platform: template
+    id: remote_timer_remaining_sensor
+    name: "VoicePE Remote Timer Remaining Seconds"
+    icon: mdi:timer-sand
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    update_interval: 1s
+    lambda: |-
+      return (float) id(remote_timer_remaining_seconds);
+
 event:
   # Event entity exposed to the user to automate on complex center button presses.
   # The simple press is not exposed as it is used to control the device itself.
@@ -1054,6 +1145,11 @@ script:
             id(control_leds_dial_touched).execute();
           } else if (id(timer_ringing).state) {
             id(control_leds_timer_ringing).execute();
+
+          } else if (id(remote_timer_running)) {
+            // NEW: device-local "remote" timer countdown
+            id(control_leds_remote_timer_ticking).execute();
+
           } else if (id(voice_assistant_phase) == ${voice_assist_waiting_for_command_phase_id}) {
             id(control_leds_voice_assistant_waiting_for_command_phase).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id}) {
@@ -1484,6 +1580,13 @@ script:
                 then:
                   - micro_wake_word.disable_model: stop
 
+  - id: control_leds_remote_timer_ticking
+    then:
+      - light.turn_on:
+          brightness: !lambda return max(id(led_ring).current_values.get_brightness(), 0.2f);
+          id: voice_assistant_leds
+          effect: "Remote Timer tick"
+
 i2s_audio:
   - id: i2s_output
     # i2s_output data pin is gpio10
@@ -1667,40 +1770,34 @@ external_components:
       - voice_kit
     refresh: 0s
   - source:
-      # https://github.com/esphome/esphome/pull/12253
-      type: git
-      url: https://github.com/esphome/esphome
-      ref: 0fe230114c80b6d3378f04c777baadee178e40ad
-    components: [mixer]
-  - source:
-      # https://github.com/esphome/esphome/pull/12254
-      type: git
-      url: https://github.com/esphome/esphome
-      ref: 1ab4b990092ae063a16cb1511a188c536fdb336e
-    components: [resampler]
-  - source:
       # https://github.com/esphome/esphome/pull/12256
       type: git
       url: https://github.com/esphome/esphome
-      ref: 047ba60f01af84513f8d5aabaa2a53074facee8f
+      ref: a2d98e1d5e020200db8f3caf27a74a939a661dc4
     components: [audio]
   - source:
       # https://github.com/esphome/esphome/pull/12258
       type: git
       url: https://github.com/esphome/esphome
-      ref: bff22983a390352360796f8e1363127e0cd1f898
+      ref: b4b7c5b25ebe0f2ab988f700219fa3c57b2377b7
     components: [media_player]
   - source:
       # https://github.com/esphome/esphome/pull/12284
       type: git
       url: https://github.com/esphome/esphome
-      ref: 71c8c6bdfc8006902eb0ea7b15bc86c575cef9be
-    components: [mdns, sendspin]
+      ref: d48058e140c98f5c2d902661d851a6b712d62434
+    components: [sendspin]
+  - source:
+      # https://github.com/esphome/esphome/pull/14013
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: 51dcce3d1f22865ebb458a5447bbc877ac946b5a
+    components: [mdns]
   - source:
       # https://github.com/esphome/esphome/pull/12429
       type: git
       url: https://github.com/esphome/esphome
-      ref: f5c1a8111df78e32d07d7a7bb800018808cdc0e7
+      ref: b49b09b6ae56502aa3ce51be86f90d732d019b2c
     refresh: 0s
     components: [file, http_request, media_source, speaker_source]
 
@@ -1919,6 +2016,29 @@ button:
     entity_category: config
     disabled_by_default: true
     icon: "mdi:restart"
+  - platform: template
+    id: remote_timer_start
+    name: "VoicePE Remote Timer Start"
+    icon: mdi:play
+    on_press:
+      - lambda: |-
+          if (id(remote_timer_total_seconds) <= 0) return;
+          id(remote_timer_remaining_seconds) = id(remote_timer_total_seconds);
+          id(remote_timer_running) = true;
+      - script.execute: control_leds
+
+  - platform: template
+    id: remote_timer_cancel
+    name: "VoicePE Remote Timer Cancel"
+    icon: mdi:stop
+    on_press:
+      - lambda: |-
+          id(remote_timer_running) = false;
+          id(remote_timer_remaining_seconds) = 0;
+          id(remote_timer_total_seconds) = 0;
+      - switch.turn_off: timer_ringing
+      - light.turn_off: voice_assistant_leds
+      - script.execute: control_leds
 
 debug:
   update_interval: 5s
